@@ -8,13 +8,14 @@ app.use(cors());
 app.use(express.json());
 
 // ==========================================
-// 1. جدول قواعد السيرفرات والترويسات (تعدل هنا مستقبلاً عند أي تغيير)
+// 1. جدول قواعد السيرفرات والترويسات
 // ==========================================
 const SERVER_CONFIG = {
   megaplay: {
-    // يستبدل أي نطاق قديم (مثل kryntal) بالنطاق النشط imgnex تلقائياً
-    domainRegex: /cdn\.(kryntal|imgnex|[a-z0-9]+)\.top/i,
+    domainRegex: /cdn\.(kryntal|imgnex|[a-z0-9]+)\.(top|me|buzz)/i,
     activeDomain: "cdn.imgnex.top",
+    // اللاحقة الجديدة المطلوبة للمشغل
+    streamSuffix: "/index-f1-v1-a1.m3u8",
     headers: {
       "Referer": "https://megaplay.buzz/",
       "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36"
@@ -23,6 +24,7 @@ const SERVER_CONFIG = {
   zokoanime: {
     domainRegex: null,
     activeDomain: null,
+    streamSuffix: null,
     headers: {
       "Referer": "https://zokoanime.video/",
       "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36"
@@ -31,6 +33,7 @@ const SERVER_CONFIG = {
   megavid: {
     domainRegex: null,
     activeDomain: null,
+    streamSuffix: null,
     headers: {
       "Referer": "https://megavid.buzz/",
       "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36"
@@ -38,15 +41,15 @@ const SERVER_CONFIG = {
   }
 };
 
-// دالة فحص وتصحيح روابط المصادر وإرفاق الترويسات
+// دالة فحص وتصحيح روابط المصادر وإرفاق الترويسات وتعديل المسار
 function processEpisodeSources(sources) {
   if (!sources || !Array.isArray(sources)) return [];
 
   return sources.map(source => {
     let serverKey = (source.serverName || source.name || '').toLowerCase().trim();
-    let streamUrl = source.url || '';
+    let streamUrl = (source.url || '').trim();
 
-    // التحقق من مفتاح السيرفر أو فحص الرابط للتعرف عليه تلقائياً
+    // التعرف التلقائي على السيرفر
     let matchedConfig = SERVER_CONFIG[serverKey];
     if (!matchedConfig) {
       if (streamUrl.includes('megaplay') || streamUrl.includes('kryntal') || streamUrl.includes('imgnex')) {
@@ -59,9 +62,23 @@ function processEpisodeSources(sources) {
     }
 
     if (matchedConfig) {
-      // تصحيح النطاق القديم إن وجد
+      // 1. تصحيح النطاق القديم إن وجد
       if (matchedConfig.domainRegex && matchedConfig.activeDomain) {
         streamUrl = streamUrl.replace(matchedConfig.domainRegex, matchedConfig.activeDomain);
+      }
+
+      // 2. ضبط نهاية الرابط (إضافة اللاحقة المطلوبة)
+      if (matchedConfig.streamSuffix) {
+        // حذف أي ملف m3u8 قديم إن وجد في النهاية (مثل /master.m3u8 أو /playlist.m3u8)
+        streamUrl = streamUrl.replace(/\/[^\/]+\.m3u8$/i, '');
+        
+        // إزالة أي شرطة مائلة زائدة في نهاية الرابط
+        streamUrl = streamUrl.replace(/\/+$/, '');
+
+        // إضافة اللاحقة فقط إذا لم تكن موجودة بالفعل
+        if (!streamUrl.endsWith(matchedConfig.streamSuffix)) {
+          streamUrl = `${streamUrl}${matchedConfig.streamSuffix}`;
+        }
       }
 
       return {
@@ -71,7 +88,7 @@ function processEpisodeSources(sources) {
       };
     }
 
-    // سيرفر بدون ترويسات خاصة
+    // سيرفر بدون تعديلات
     return {
       ...source,
       url: streamUrl,
@@ -172,13 +189,11 @@ app.get('/api/animes/:id', async (req, res) => {
   try {
     const { id } = req.params;
 
-    // جلب بيانات الأنمي
     const anime = await Anime.findById(id);
     if (!anime) {
       return res.status(404).json({ success: false, message: 'Anime not found' });
     }
 
-    // جلب الحلقات
     let queryConditions = [
       { anime_id: id },
       { animeId: id }
@@ -191,7 +206,6 @@ app.get('/api/animes/:id', async (req, res) => {
 
     const rawEpisodes = await Episode.find({ $or: queryConditions }).sort({ seasonNumber: 1, episodeNumber: 1 });
 
-    // توحيد التنسيق ومعالجة الترويسات والنطاقات لحظياً
     const formattedEpisodes = rawEpisodes.map(ep => {
       const epObj = ep.toObject();
 
@@ -204,7 +218,6 @@ app.get('/api/animes/:id', async (req, res) => {
         }));
       }
 
-      // تمرير المصادر لمعالجة النطاقات وحقن الترويسات
       const processedSources = processEpisodeSources(sources);
 
       let subtitles = epObj.subtitles || [];
@@ -237,7 +250,6 @@ app.get('/api/animes/:id', async (req, res) => {
   }
 });
 
-// تشغيل السيرفر
 const PORT = process.env.PORT || 5000;
 app.listen(PORT, () => {
   console.log(`🚀 Server running on http://localhost:${PORT}`);
