@@ -175,7 +175,7 @@ app.get('/api/animes', async (req, res) => {
 });
 
 // ==========================================
-// 5. مسار المشغل الرئيسي
+// 5. مسار المشغل الرئيسي (مُحسّن لدعم التبديل بين المواسم)
 // ==========================================
 app.get('/api/animes/:id', async (req, res) => {
   try {
@@ -192,25 +192,37 @@ app.get('/api/animes/:id', async (req, res) => {
       return res.status(404).json({ success: false, message: 'Anime not found' });
     }
 
-    const animeStringId = anime._id.toString();
+    // 1. استخراج الاسم الأساسي للأنمي لجلب مواسم السلسلة معاً (مثل Jujutsu Kaisen)
+    const rawTitle = anime.title?.en || anime.title || "";
+    const cleanBaseTitle = rawTitle.replace(/\s*(2nd Season|Season \d+|Part \d+|\(TV\)).*/i, '').trim();
 
+    // 2. البحث عن جميع مواسم السلسلة المسجلة في جدول animes
+    const franchiseAnimes = await Anime.find({
+      $or: [
+        { "title.en": { $regex: new RegExp(`^${cleanBaseTitle}`, "i") } },
+        { _id: anime._id }
+      ]
+    });
+
+    const franchiseIds = franchiseAnimes.map(a => a._id.toString());
+    const franchiseUuids = franchiseAnimes.map(a => a.source_uuid).filter(Boolean);
+
+    // 3. جلب جميع الحلقات التابعة لكل مواسم السلسلة
     let queryConditions = [
-      { anime_id: id },
-      { animeId: id },
-      { anime_id: animeStringId },
-      { animeId: animeStringId }
+      { anime_id: { $in: franchiseIds } },
+      { animeId: { $in: franchiseIds } },
+      { source_uuid: { $in: franchiseUuids } }
     ];
 
     if (mongoose.Types.ObjectId.isValid(id)) {
       const objId = new mongoose.Types.ObjectId(id);
       queryConditions.push({ anime_id: objId }, { animeId: objId });
     }
-    if (anime.source_uuid) {
-      queryConditions.push({ anime_id: anime.source_uuid }, { animeId: anime.source_uuid });
-    }
 
-    const rawEpisodes = await Episode.find({ $or: queryConditions }).sort({ seasonNumber: 1, episodeNumber: 1 });
+    const rawEpisodes = await Episode.find({ $or: queryConditions })
+      .sort({ seasonNumber: 1, episodeNumber: 1 });
 
+    // 4. معالجة السيرفرات والترجمة لكل حلقة
     const formattedEpisodes = rawEpisodes.map(ep => {
       const epObj = ep.toObject();
 
@@ -227,15 +239,15 @@ app.get('/api/animes/:id', async (req, res) => {
 
       let subtitles = epObj.subtitles || [];
       subtitles = subtitles.map(sub => ({
-        lang: sub.lang || sub.language || sub.label || 'Arabic',
+        lang: sub.lang || sub.language || sub.label || 'English',
         url: sub.url
       }));
 
       return {
         ...epObj,
         title: typeof epObj.title === 'object' 
-          ? (epObj.title.ar || epObj.title.en || `الحلقة ${epObj.episodeNumber}`) 
-          : (epObj.title || `الحلقة ${epObj.episodeNumber}`),
+          ? (epObj.title.en || epObj.title.ar || `Episode ${epObj.episodeNumber}`) 
+          : (epObj.title || `Episode ${epObj.episodeNumber}`),
         seasonNumber: epObj.seasonNumber || 1,
         seasonTitle: epObj.seasonTitle || `Season ${epObj.seasonNumber || 1}`,
         sources: processedSources,
@@ -243,10 +255,31 @@ app.get('/api/animes/:id', async (req, res) => {
       };
     });
 
+    // 5. تجميع الحلقات داخل مصفوفة مواسم منظمة للمشغل
+    const seasonsMap = new Map();
+    formattedEpisodes.forEach(ep => {
+      const sNum = ep.seasonNumber || 1;
+      const sTitle = ep.seasonTitle || `Season ${sNum}`;
+
+      if (!seasonsMap.has(sNum)) {
+        seasonsMap.set(sNum, {
+          title: sTitle,
+          seasonNumber: sNum,
+          episodes: []
+        });
+      }
+      seasonsMap.get(sNum).episodes.push(ep);
+    });
+
+    const structuredSeasons = Array.from(seasonsMap.values())
+      .sort((a, b) => a.seasonNumber - b.seasonNumber);
+
+    // 6. إرجاع المواسم والحلقات معاً لضمان قراءة المشغل لكامل السلسلة
     res.json({
       success: true,
       data: {
         ...anime.toObject(),
+        seasons: structuredSeasons,
         episodes: formattedEpisodes
       }
     });
