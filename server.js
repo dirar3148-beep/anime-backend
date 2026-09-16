@@ -117,7 +117,8 @@ const animeSchema = new mongoose.Schema({
     enum: ['popular', 'trending', 'new_releases', 'continue_watching'],
     default: 'new_releases'
   },
-  status: { type: String, default: 'Ongoing' }
+  status: { type: String, default: 'Ongoing' },
+  seasonNumber: { type: Number, default: 1 }
 }, { timestamps: true, strict: false });
 
 const episodeSchema = new mongoose.Schema({
@@ -175,7 +176,7 @@ app.get('/api/animes', async (req, res) => {
 });
 
 // ==========================================
-// 5. مسار المشغل الرئيسي (مُحسّن لدعم التبديل بين المواسم)
+// 5. مسار المشغل الرئيسي
 // ==========================================
 app.get('/api/animes/:id', async (req, res) => {
   try {
@@ -274,11 +275,18 @@ app.get('/api/animes/:id', async (req, res) => {
     const structuredSeasons = Array.from(seasonsMap.values())
       .sort((a, b) => a.seasonNumber - b.seasonNumber);
 
-    // 6. إرجاع المواسم والحلقات معاً لضمان قراءة المشغل لكامل السلسلة
+    // 6. تحديد مؤشر الموسم الافتراضي بناءً على الأنمي المضغوط عليه
+    const currentSeasonNum = anime.seasonNumber || 1;
+    let targetSeasonIndex = structuredSeasons.findIndex(s => s.seasonNumber === currentSeasonNum);
+    if (targetSeasonIndex === -1) targetSeasonIndex = 0;
+
+    // 7. إرجاع المواسم والحلقات مع مؤشر الموسم المطلوب
     res.json({
       success: true,
       data: {
         ...anime.toObject(),
+        seasonNumber: currentSeasonNum,
+        defaultSeasonIndex: targetSeasonIndex,
         seasons: structuredSeasons,
         episodes: formattedEpisodes
       }
