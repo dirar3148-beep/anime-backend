@@ -14,7 +14,6 @@ const SERVER_CONFIG = {
   megaplay: {
     domainRegex: /cdn\.(kryntal|imgnex|[a-z0-9]+)\.(top|me|buzz)/i,
     activeDomain: "cdn.imgnex.top",
-    // اللاحقة الجديدة المطلوبة للمشغل
     streamSuffix: "/index-f1-v1-a1.m3u8",
     headers: {
       "Referer": "https://megaplay.buzz/",
@@ -41,7 +40,6 @@ const SERVER_CONFIG = {
   }
 };
 
-// دالة فحص وتصحيح روابط المصادر وإرفاق الترويسات وتعديل المسار
 function processEpisodeSources(sources) {
   if (!sources || !Array.isArray(sources)) return [];
 
@@ -49,7 +47,6 @@ function processEpisodeSources(sources) {
     let serverKey = (source.serverName || source.name || '').toLowerCase().trim();
     let streamUrl = (source.url || '').trim();
 
-    // التعرف التلقائي على السيرفر
     let matchedConfig = SERVER_CONFIG[serverKey];
     if (!matchedConfig) {
       if (streamUrl.includes('megaplay') || streamUrl.includes('kryntal') || streamUrl.includes('imgnex')) {
@@ -62,20 +59,13 @@ function processEpisodeSources(sources) {
     }
 
     if (matchedConfig) {
-      // 1. تصحيح النطاق القديم إن وجد
       if (matchedConfig.domainRegex && matchedConfig.activeDomain) {
         streamUrl = streamUrl.replace(matchedConfig.domainRegex, matchedConfig.activeDomain);
       }
 
-      // 2. ضبط نهاية الرابط (إضافة اللاحقة المطلوبة)
       if (matchedConfig.streamSuffix) {
-        // حذف أي ملف m3u8 قديم إن وجد في النهاية (مثل /master.m3u8 أو /playlist.m3u8)
         streamUrl = streamUrl.replace(/\/[^\/]+\.m3u8$/i, '');
-        
-        // إزالة أي شرطة مائلة زائدة في نهاية الرابط
         streamUrl = streamUrl.replace(/\/+$/, '');
-
-        // إضافة اللاحقة فقط إذا لم تكن موجودة بالفعل
         if (!streamUrl.endsWith(matchedConfig.streamSuffix)) {
           streamUrl = `${streamUrl}${matchedConfig.streamSuffix}`;
         }
@@ -88,11 +78,14 @@ function processEpisodeSources(sources) {
       };
     }
 
-    // سيرفر بدون تعديلات
+    // إذا كان الرابط لا يحتاج تعديلات، نضمن وجود ترويسة افتراضية سريعة
     return {
       ...source,
       url: streamUrl,
-      headers: {}
+      headers: source.headers || {
+        "User-Agent": "okhttp/4.12.0",
+        "Accept": "*/*"
+      }
     };
   });
 }
@@ -127,13 +120,15 @@ const animeSchema = new mongoose.Schema({
     enum: ['popular', 'trending', 'new_releases', 'continue_watching'],
     default: 'new_releases'
   },
-  status: { type: String, default: 'Ongoing' }
-}, { timestamps: true });
+  status: { type: String, default: 'Ongoing' },
+  source_uuid: { type: String }
+}, { timestamps: true, strict: false });
 
 const episodeSchema = new mongoose.Schema({
   anime_id: { type: mongoose.Schema.Types.Mixed },
   animeId: { type: mongoose.Schema.Types.Mixed },
   seasonNumber: { type: Number, required: true, default: 1 },
+  seasonTitle: { type: String, default: "Season 1" },
   episodeNumber: { type: Number, required: true },
   title: { type: String },
   thumbnail: { type: String },
@@ -142,6 +137,7 @@ const episodeSchema = new mongoose.Schema({
       serverName: { type: String },
       quality: { type: String },
       url: { type: String, required: true },
+      headers: { type: Map, of: String },
       subtitles: [
         {
           lang: { type: String },
@@ -183,18 +179,30 @@ app.get('/api/animes', async (req, res) => {
 });
 
 // ==========================================
-// 5. مسار المشغل الرئيسي (معالجة السيرفرات والترويسات)
+// 5. مسار المشغل الرئيسي (المعدّل بدعم المواسم)
 // ==========================================
 app.get('/api/animes/:id', async (req, res) => {
   try {
     const { id } = req.params;
 
-    const anime = await Anime.findById(id);
+    // 1. البحث عن الأنمي سواء بـ _id أو source_uuid
+    let anime = null;
+    if (mongoose.Types.ObjectId.isValid(id)) {
+      anime = await Anime.findById(id);
+    }
+    if (!anime) {
+      anime = await Anime.findOne({ source_uuid: id });
+    }
     if (!anime) {
       return res.status(404).json({ success: false, message: 'Anime not found' });
     }
 
+    const animeObjId = anime._id.toString();
+
+    // 2. شروط البحث المرنة لجلب حلقات هذا الأنمي بكل المعرفات الممكنة
     let queryConditions = [
+      { anime_id: animeObjId },
+      { animeId: animeObjId },
       { anime_id: id },
       { animeId: id }
     ];
@@ -203,9 +211,14 @@ app.get('/api/animes/:id', async (req, res) => {
       const objId = new mongoose.Types.ObjectId(id);
       queryConditions.push({ anime_id: objId }, { animeId: objId });
     }
+    if (anime.source_uuid) {
+      queryConditions.push({ anime_id: anime.source_uuid }, { animeId: anime.source_uuid });
+    }
 
-    const rawEpisodes = await Episode.find({ $or: queryConditions }).sort({ seasonNumber: 1, episodeNumber: 1 });
+    const rawEpisodes = await Episode.find({ $or: queryConditions })
+      .sort({ seasonNumber: 1, episodeNumber: 1 });
 
+    // 3. معالجة وتوحيد بيانات كل حلقة
     const formattedEpisodes = rawEpisodes.map(ep => {
       const epObj = ep.toObject();
 
@@ -222,30 +235,54 @@ app.get('/api/animes/:id', async (req, res) => {
 
       let subtitles = epObj.subtitles || [];
       subtitles = subtitles.map(sub => ({
-        lang: sub.lang || sub.language || sub.label || 'Arabic',
+        lang: sub.lang || sub.language || sub.label || 'English',
         url: sub.url
       }));
 
       return {
         ...epObj,
         title: typeof epObj.title === 'object' 
-          ? (epObj.title.ar || epObj.title.en || `الحلقة ${epObj.episodeNumber}`) 
-          : (epObj.title || `الحلقة ${epObj.episodeNumber}`),
+          ? (epObj.title.en || epObj.title.ar || `Episode ${epObj.episodeNumber}`) 
+          : (epObj.title || `Episode ${epObj.episodeNumber}`),
+        seasonNumber: epObj.seasonNumber || 1,
+        seasonTitle: epObj.seasonTitle || `Season ${epObj.seasonNumber || 1}`,
         sources: processedSources,
         subtitles: subtitles
       };
     });
 
+    // 4. تجميع الحلقات داخل هيكل مواسم منظم يطابق PlayerActivity
+    const seasonsMap = new Map();
+
+    formattedEpisodes.forEach(ep => {
+      const sNum = ep.seasonNumber || 1;
+      const sTitle = ep.seasonTitle || `Season ${sNum}`;
+
+      if (!seasonsMap.has(sNum)) {
+        seasonsMap.set(sNum, {
+          title: sTitle,
+          seasonNumber: sNum,
+          episodes: []
+        });
+      }
+      seasonsMap.get(sNum).episodes.push(ep);
+    });
+
+    const structuredSeasons = Array.from(seasonsMap.values())
+      .sort((a, b) => a.seasonNumber - b.seasonNumber);
+
+    // 5. إرجاع المواسم والحلقات معاً لضمان عمل المشغل فوراً
     res.json({
       success: true,
       data: {
         ...anime.toObject(),
+        seasons: structuredSeasons,
         episodes: formattedEpisodes
       }
     });
 
   } catch (err) {
-    console.error(err);
+    console.error("Error in /api/animes/:id :", err);
     res.status(500).json({ success: false, error: 'Failed to fetch anime details and episodes' });
   }
 });
