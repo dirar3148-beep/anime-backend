@@ -8,7 +8,7 @@ app.use(cors());
 app.use(express.json());
 
 // ==========================================
-// 1. جدول قواعد السيرفرات والترويسات
+// 1. إعدادات السيرفرات والترويسات
 // ==========================================
 const SERVER_CONFIG = {
   megaplay: {
@@ -95,81 +95,41 @@ mongoose.connect(process.env.MONGO_URI)
   .catch((err) => console.error('❌ Database connection error:', err));
 
 // ==========================================
-// 3. النماذج (Schemas)
+// 3. النماذج المرنة (Flexible Schemas)
 // ==========================================
-const animeSchema = new mongoose.Schema({
-  title: {
-    en: { type: String, required: true },
-    ar: { type: String }
-  },
-  description: {
-    en: { type: String, required: true },
-    ar: { type: String }
-  },
-  poster: { type: String, required: true },
-  banner: { type: String, required: true },
-  rating: { type: Number, default: 0 },
-  releaseYear: { type: String, default: "2024" },
-  category: { type: String, default: "Anime" },
-  genres: [String],
-  section: {
-    type: String,
-    enum: ['popular', 'trending', 'new_releases', 'continue_watching'],
-    default: 'new_releases'
-  },
-  status: { type: String, default: 'Ongoing' },
-  seasonNumber: { type: Number, default: 1 }
-}, { timestamps: true, strict: false });
-
-const episodeSchema = new mongoose.Schema({
-  anime_id: { type: mongoose.Schema.Types.Mixed },
-  animeId: { type: mongoose.Schema.Types.Mixed },
-  seasonNumber: { type: Number, required: true, default: 1 },
-  seasonTitle: { type: String, default: "Season 1" },
-  episodeNumber: { type: Number, required: true },
-  title: { type: String },
-  thumbnail: { type: String },
-  sources: [
-    {
-      serverName: { type: String },
-      quality: { type: String },
-      url: { type: String, required: true },
-      headers: { type: Map, of: String },
-      subtitles: [
-        {
-          lang: { type: String },
-          url: { type: String }
-        }
-      ]
-    }
-  ],
-  servers: [
-    {
-      name: { type: String },
-      url: { type: String },
-      type: { type: String }
-    }
-  ],
-  subtitles: [
-    {
-      label: { type: String },
-      lang: { type: String },
-      language: { type: String },
-      url: { type: String, required: true }
-    }
-  ]
-}, { timestamps: true, strict: false });
+// استخدام strict: false يضمن عدم فشل القراءة مهما اختلف شكل الحقول
+const animeSchema = new mongoose.Schema({}, { strict: false, timestamps: true });
+const episodeSchema = new mongoose.Schema({}, { strict: false, timestamps: true });
 
 const Anime = mongoose.model('Anime', animeSchema, 'animes');
 const Episode = mongoose.model('Episode', episodeSchema, 'episodes');
 
 // ==========================================
-// 4. مسارات الكاتالوغ (Catalog Endpoints)
+// 4. مسار الكتالوج العام للمكتبة
 // ==========================================
 app.get('/api/animes', async (req, res) => {
   try {
-    const animes = await Anime.find().sort({ createdAt: -1 });
-    res.json(animes);
+    const rawAnimes = await Anime.find().sort({ createdAt: -1 }).lean();
+
+    // توحيد بنية البيانات حتى لا تفشل نماذج Retrofit في تطبيق الأندرويد
+    const sanitizedAnimes = rawAnimes.map(item => {
+      let titleObj = item.title;
+      if (typeof titleObj === 'string') {
+        titleObj = { en: titleObj, ar: titleObj };
+      } else if (!titleObj) {
+        titleObj = { en: 'Unknown Title', ar: 'عنوان غير معروف' };
+      }
+
+      return {
+        ...item,
+        title: titleObj,
+        section: item.section || 'popular',
+        rating: typeof item.rating === 'number' ? item.rating : 8.0,
+        seasonNumber: item.seasonNumber || 1
+      };
+    });
+
+    res.json(sanitizedAnimes);
   } catch (err) {
     console.error("Error in /api/animes:", err);
     res.status(500).json({ error: 'Failed to fetch animes' });
@@ -177,7 +137,7 @@ app.get('/api/animes', async (req, res) => {
 });
 
 // ==========================================
-// 5. مسار المشغل الرئيسي
+// 5. مسار المشغل وتفاصيل المواسم
 // ==========================================
 app.get('/api/animes/:id', async (req, res) => {
   try {
@@ -185,52 +145,56 @@ app.get('/api/animes/:id', async (req, res) => {
 
     let anime = null;
     if (mongoose.Types.ObjectId.isValid(id)) {
-      anime = await Anime.findById(id);
+      anime = await Anime.findById(id).lean();
     }
     if (!anime) {
-      anime = await Anime.findOne({ source_uuid: id });
+      anime = await Anime.findOne({ source_uuid: id }).lean();
     }
     if (!anime) {
       return res.status(404).json({ success: false, message: 'Anime not found' });
     }
 
-    // 1. استخراج الاسم الأساسي
-    const rawTitle = anime.title?.en || anime.title || "";
-    const cleanBaseTitle = rawTitle
-      .split(':')[0]
-      .replace(/\s*(2nd Season|Season \d+|Part \d+|\(TV\)|-).*/i, '')
-      .trim();
+    const rawTitle = anime.title?.en || (typeof anime.title === 'string' ? anime.title : '');
 
-    // 2. تصفية ذكية وآمنة عبر Mongoose لمنع التداخل بين ناروتو القديم وشيبودن
-    let franchiseFilter = {};
-    const isShippuden = /shippuden/i.test(rawTitle);
+    // استخراج اسم السلسلة بدقة تامة وبدون أي خطأ في استعلام Mongo
+    let franchiseAnimes = [];
 
-    if (isShippuden) {
-      franchiseFilter = { "title.en": { $regex: "^Naruto Shippuden", $options: "i" } };
-    } else if (/^naruto\b/i.test(cleanBaseTitle)) {
-      franchiseFilter = {
-        $and: [
-          { "title.en": { $regex: "^Naruto\\b", $options: "i" } },
-          { "title.en": { $not: { $regex: "Shippuden", $options: "i" } } }
-        ]
-      };
+    if (/shippuden/i.test(rawTitle)) {
+      // إذا كان ناروتو شيبودن: اجلب كل ما يخص شيبودن فقط
+      franchiseAnimes = await Anime.find({
+        "title.en": { $regex: /shippuden/i }
+      }).lean();
+    } else if (/\bnaruto\b/i.test(rawTitle)) {
+      // إذا كان ناروتو الكلاسيكي: اجلب أعمال ناروتو مع استبعاد شيبودن من النتائج في الذاكرة بأمان
+      const narutoDocs = await Anime.find({
+        "title.en": { $regex: /\bnaruto\b/i }
+      }).lean();
+
+      franchiseAnimes = narutoDocs.filter(doc => {
+        const t = (doc.title?.en || doc.title || '').toString();
+        return !/shippuden/i.test(t);
+      });
     } else {
-      // لبقية الأنميات (Jujutsu Kaisen, One Piece, وغيرها)
-      franchiseFilter = { "title.en": { $regex: `^${cleanBaseTitle}`, $options: "i" } };
+      // للأنميات الأخرى مثل Jujutsu Kaisen
+      const cleanBase = rawTitle.split(':')[0].replace(/\s*(2nd Season|Season \d+|Part \d+|\(TV\)|-).*/i, '').trim();
+      franchiseAnimes = await Anime.find({
+        $or: [
+          { "title.en": { $regex: new RegExp(`^${cleanBase}`, "i") } },
+          { _id: anime._id }
+        ]
+      }).lean();
     }
 
-    const franchiseAnimes = await Anime.find({
-      $or: [
-        franchiseFilter,
-        { _id: anime._id }
-      ]
-    });
+    // إذا لم يجد سوى العمل الحالي
+    if (!franchiseAnimes || franchiseAnimes.length === 0) {
+      franchiseAnimes = [anime];
+    }
 
     const franchiseIds = franchiseAnimes.map(a => a._id.toString());
     const franchiseUuids = franchiseAnimes.map(a => a.source_uuid).filter(Boolean);
 
-    // 3. جلب جميع الحلقات التابعة لكل مواسم السلسلة
-    let queryConditions = [
+    // البحث عن الحلقات بكافة المعرفات المحتملة
+    const queryOr = [
       { anime_id: { $in: franchiseIds } },
       { animeId: { $in: franchiseIds } },
       { source_uuid: { $in: franchiseUuids } }
@@ -238,16 +202,15 @@ app.get('/api/animes/:id', async (req, res) => {
 
     if (mongoose.Types.ObjectId.isValid(id)) {
       const objId = new mongoose.Types.ObjectId(id);
-      queryConditions.push({ anime_id: objId }, { animeId: objId });
+      queryOr.push({ anime_id: objId }, { animeId: objId });
     }
 
-    const rawEpisodes = await Episode.find({ $or: queryConditions })
-      .sort({ seasonNumber: 1, episodeNumber: 1 });
+    const rawEpisodes = await Episode.find({ $or: queryOr })
+      .sort({ seasonNumber: 1, episodeNumber: 1 })
+      .lean();
 
-    // 4. معالجة السيرفرات والترجمة لكل حلقة
-    const formattedEpisodes = rawEpisodes.map(ep => {
-      const epObj = ep.toObject();
-
+    // تنسيق الحلقات والمصادر
+    const formattedEpisodes = rawEpisodes.map(epObj => {
       let sources = epObj.sources || [];
       if (sources.length === 0 && epObj.servers && epObj.servers.length > 0) {
         sources = epObj.servers.map(s => ({
@@ -265,11 +228,13 @@ app.get('/api/animes/:id', async (req, res) => {
         url: sub.url
       }));
 
+      const finalTitle = typeof epObj.title === 'object'
+        ? (epObj.title.en || epObj.title.ar || `Episode ${epObj.episodeNumber}`)
+        : (epObj.title || `Episode ${epObj.episodeNumber}`);
+
       return {
         ...epObj,
-        title: typeof epObj.title === 'object' 
-          ? (epObj.title.en || epObj.title.ar || `Episode ${epObj.episodeNumber}`) 
-          : (epObj.title || `Episode ${epObj.episodeNumber}`),
+        title: finalTitle,
         seasonNumber: epObj.seasonNumber || 1,
         seasonTitle: epObj.seasonTitle || `Season ${epObj.seasonNumber || 1}`,
         sources: processedSources,
@@ -277,7 +242,7 @@ app.get('/api/animes/:id', async (req, res) => {
       };
     });
 
-    // 5. تجميع الحلقات داخل مصفوفة مواسم منظمة للمشغل
+    // تجميع الحلقات داخل مواسم للمشغل
     const seasonsMap = new Map();
     formattedEpisodes.forEach(ep => {
       const sNum = ep.seasonNumber || 1;
@@ -296,16 +261,14 @@ app.get('/api/animes/:id', async (req, res) => {
     const structuredSeasons = Array.from(seasonsMap.values())
       .sort((a, b) => a.seasonNumber - b.seasonNumber);
 
-    // 6. تحديد مؤشر الموسم الافتراضي بناءً على الأنمي المضغوط عليه
     const currentSeasonNum = anime.seasonNumber || 1;
     let targetSeasonIndex = structuredSeasons.findIndex(s => s.seasonNumber === currentSeasonNum);
     if (targetSeasonIndex === -1) targetSeasonIndex = 0;
 
-    // 7. إرجاع المواسم والحلقات مع مؤشر الموسم المطلوب
     res.json({
       success: true,
       data: {
-        ...anime.toObject(),
+        ...anime,
         seasonNumber: currentSeasonNum,
         defaultSeasonIndex: targetSeasonIndex,
         seasons: structuredSeasons,
