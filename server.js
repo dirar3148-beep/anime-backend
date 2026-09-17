@@ -226,7 +226,7 @@ app.get('/api/animes/:id', async (req, res) => {
     const rawEpisodes = await Episode.find({ $or: queryConditions })
       .sort({ seasonNumber: 1, episodeNumber: 1 });
 
-    // 4. معالجة السيرفرات والترجمة لكل حلقة
+    // 4. معالجة السيرفرات والترجمة وتوحيد التسميات
     const formattedEpisodes = rawEpisodes.map(ep => {
       const epObj = ep.toObject();
 
@@ -249,27 +249,36 @@ app.get('/api/animes/:id', async (req, res) => {
 
       const parsedSeasonNum = parseInt(epObj.seasonNumber, 10) || 1;
 
+      // توحيد اسم الموسم ليبدأ بـ Season X حتى يتعرف عليه مشغل الأندرويد
+      let sTitle = (epObj.seasonTitle || '').trim();
+      if (!sTitle) {
+        sTitle = `Season ${parsedSeasonNum}`;
+      } else if (!sTitle.toLowerCase().startsWith('season')) {
+        sTitle = `Season ${parsedSeasonNum}: ${sTitle}`;
+      }
+
       return {
         ...epObj,
         title: typeof epObj.title === 'object' 
           ? (epObj.title.en || epObj.title.ar || `Episode ${epObj.episodeNumber}`) 
           : (epObj.title || `Episode ${epObj.episodeNumber}`),
         seasonNumber: parsedSeasonNum,
-        seasonTitle: epObj.seasonTitle || `Season ${parsedSeasonNum}`,
+        seasonTitle: sTitle,
         sources: processedSources,
         subtitles: subtitles
       };
     });
 
-    // 5. تجميع الحلقات داخل مصفوفة مواسم منظمة للمشغل
+    // 5. تجميع الحلقات داخل مصفوفة مواسم منظمة للمشغل بصيغة متوافقة تماماً
     const seasonsMap = new Map();
     formattedEpisodes.forEach(ep => {
       const sNum = parseInt(ep.seasonNumber, 10) || 1;
-      const sTitle = ep.seasonTitle || `Season ${sNum}`;
+      const sTitle = ep.seasonTitle;
 
       if (!seasonsMap.has(sNum)) {
         seasonsMap.set(sNum, {
           title: sTitle,
+          seasonTitle: sTitle,
           seasonNumber: sNum,
           episodes: []
         });
