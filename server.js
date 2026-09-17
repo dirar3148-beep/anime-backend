@@ -226,7 +226,7 @@ app.get('/api/animes/:id', async (req, res) => {
     const rawEpisodes = await Episode.find({ $or: queryConditions })
       .sort({ seasonNumber: 1, episodeNumber: 1 });
 
-    // 4. معالجة السيرفرات والترجمة وتوحيد التسميات
+    // 4. معالجة السيرفرات والترجمة وعرض عنوان الآرك كما هو بدون إضافة "Season"
     const formattedEpisodes = rawEpisodes.map(ep => {
       const epObj = ep.toObject();
 
@@ -248,14 +248,8 @@ app.get('/api/animes/:id', async (req, res) => {
       }));
 
       const parsedSeasonNum = parseInt(epObj.seasonNumber, 10) || 1;
-
-      // توحيد اسم الموسم ليبدأ بـ Season X حتى يتعرف عليه مشغل الأندرويد
-      let sTitle = (epObj.seasonTitle || '').trim();
-      if (!sTitle) {
-        sTitle = `Season ${parsedSeasonNum}`;
-      } else if (!sTitle.toLowerCase().startsWith('season')) {
-        sTitle = `Season ${parsedSeasonNum}: ${sTitle}`;
-      }
+      // استخدام عنوان الموسم الأصلي المسجل بالحلقة كما هو
+      const sTitle = (epObj.seasonTitle || '').trim() || `Season ${parsedSeasonNum}`;
 
       return {
         ...epObj,
@@ -269,40 +263,52 @@ app.get('/api/animes/:id', async (req, res) => {
       };
     });
 
-    // 5. تجميع الحلقات داخل مصفوفة مواسم منظمة للمشغل بصيغة متوافقة تماماً
+    // 5. تجميع الحلقات داخل مصفوفة مواسم نظيفة تعتمد العنوان الأصلي
     const seasonsMap = new Map();
     formattedEpisodes.forEach(ep => {
-      const sNum = parseInt(ep.seasonNumber, 10) || 1;
-      const sTitle = ep.seasonTitle;
+      // الاعتماد على العنوان أولاً أو رقم الموسم كمفتاح تجميع
+      const sKey = ep.seasonTitle || `Season ${ep.seasonNumber}`;
+      const sNum = ep.seasonNumber;
 
-      if (!seasonsMap.has(sNum)) {
-        seasonsMap.set(sNum, {
-          title: sTitle,
-          seasonTitle: sTitle,
+      if (!seasonsMap.has(sKey)) {
+        seasonsMap.set(sKey, {
+          title: sKey,
+          seasonTitle: sKey,
           seasonNumber: sNum,
           episodes: []
         });
       }
-      seasonsMap.get(sNum).episodes.push(ep);
+      seasonsMap.get(sKey).episodes.push(ep);
     });
 
     const structuredSeasons = Array.from(seasonsMap.values())
       .sort((a, b) => a.seasonNumber - b.seasonNumber);
 
-    // 6. تحديد مؤشر الموسم الافتراضي بدقة تامة باستخدام parseInt
-    const currentSeasonNum = parseInt(anime.seasonNumber, 10) || 1;
-    let targetSeasonIndex = structuredSeasons.findIndex(s => parseInt(s.seasonNumber, 10) === currentSeasonNum);
+    // 6. تحديد مؤشر الموسم عبر المطابقة المباشرة مع عنوان العمل في الكتالوج (Title Matching)
+    // استخراج عنوان الآرك الخاص بالعنصر المضغوط عليه (سواء كان في seasonTitle أو بعد النقطتين في الاسم)
+    const clickedSeasonTitle = (anime.seasonTitle || '').toLowerCase().trim();
+    const clickedSubtitlePart = rawTitle.includes(':') 
+      ? rawTitle.split(':')[1].toLowerCase().trim() 
+      : rawTitle.toLowerCase().trim();
 
-    // التحقق الاحتياطي بالاسم إذا اختلف الترقيم
-    if (targetSeasonIndex === -1 && anime.seasonTitle) {
-      targetSeasonIndex = structuredSeasons.findIndex(
-        s => s.title && s.title.toLowerCase().trim() === anime.seasonTitle.toLowerCase().trim()
-      );
+    let targetSeasonIndex = structuredSeasons.findIndex(s => {
+      const sTitleLower = (s.title || '').toLowerCase().trim();
+      // مطابقة بالاسم الكامل المسجل للموسم
+      if (clickedSeasonTitle && sTitleLower === clickedSeasonTitle) return true;
+      // مطابقة إذا كان عنوان الموسم يحتوي على الجزء الخاص بالآرك (مثل East Blue)
+      if (clickedSubtitlePart && (sTitleLower.includes(clickedSubtitlePart) || clickedSubtitlePart.includes(sTitleLower))) return true;
+      return false;
+    });
+
+    // احتياطي: إذا لم يتطابق بالاسم، يطابق برقم الموسم
+    if (targetSeasonIndex === -1) {
+      const currentSeasonNum = parseInt(anime.seasonNumber, 10) || 1;
+      targetSeasonIndex = structuredSeasons.findIndex(s => s.seasonNumber === currentSeasonNum);
     }
 
     if (targetSeasonIndex === -1) targetSeasonIndex = 0;
 
-    // 7. إسناد حلقات الموسم المضغوط عليه مباشرة في حقل episodes
+    // 7. إسناد حلقات الموسم المطابق مباشرة لواجهة المشغل
     const activeSeasonEpisodes = structuredSeasons[targetSeasonIndex]
       ? structuredSeasons[targetSeasonIndex].episodes
       : formattedEpisodes;
@@ -311,10 +317,11 @@ app.get('/api/animes/:id', async (req, res) => {
       success: true,
       data: {
         ...anime.toObject(),
-        seasonNumber: currentSeasonNum,
+        seasonNumber: structuredSeasons[targetSeasonIndex]?.seasonNumber || 1,
+        seasonTitle: structuredSeasons[targetSeasonIndex]?.title || anime.seasonTitle,
         defaultSeasonIndex: targetSeasonIndex,
         seasons: structuredSeasons,
-        episodes: activeSeasonEpisodes, // ⬅️ حلقات الموسم المختار مباشرة لواجهة المشغل
+        episodes: activeSeasonEpisodes,
         allEpisodes: formattedEpisodes
       }
     });
