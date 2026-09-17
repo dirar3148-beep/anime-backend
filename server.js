@@ -193,7 +193,7 @@ app.get('/api/animes/:id', async (req, res) => {
       return res.status(404).json({ success: false, message: 'Anime not found' });
     }
 
-    // 1. استخراج الاسم الأساسي للأنمي بتنظيف كل ما يتبع النقطتين الرأسيتين أو صياغات المواسم والآركات
+    // 1. استخراج الاسم الأساسي للأنمي
     const rawTitle = anime.title?.en || anime.title || "";
     const cleanBaseTitle = rawTitle
       .split(':')[0]
@@ -226,7 +226,7 @@ app.get('/api/animes/:id', async (req, res) => {
     const rawEpisodes = await Episode.find({ $or: queryConditions })
       .sort({ seasonNumber: 1, episodeNumber: 1 });
 
-    // 4. معالجة السيرفرات والترجمة وعرض عنوان الآرك كما هو بدون إضافة "Season"
+    // 4. معالجة السيرفرات والترجمة والاحتفاظ بالعنوان الأصلي للآرك
     const formattedEpisodes = rawEpisodes.map(ep => {
       const epObj = ep.toObject();
 
@@ -248,7 +248,6 @@ app.get('/api/animes/:id', async (req, res) => {
       }));
 
       const parsedSeasonNum = parseInt(epObj.seasonNumber, 10) || 1;
-      // استخدام عنوان الموسم الأصلي المسجل بالحلقة كما هو
       const sTitle = (epObj.seasonTitle || '').trim() || `Season ${parsedSeasonNum}`;
 
       return {
@@ -263,11 +262,10 @@ app.get('/api/animes/:id', async (req, res) => {
       };
     });
 
-    // 5. تجميع الحلقات داخل مصفوفة مواسم نظيفة تعتمد العنوان الأصلي
+    // 5. تجميع الحلقات داخل مصفوفة المواسم
     const seasonsMap = new Map();
     formattedEpisodes.forEach(ep => {
-      // الاعتماد على العنوان أولاً أو رقم الموسم كمفتاح تجميع
-      const sKey = ep.seasonTitle || `Season ${ep.seasonNumber}`;
+      const sKey = ep.seasonTitle;
       const sNum = ep.seasonNumber;
 
       if (!seasonsMap.has(sKey)) {
@@ -284,31 +282,22 @@ app.get('/api/animes/:id', async (req, res) => {
     const structuredSeasons = Array.from(seasonsMap.values())
       .sort((a, b) => a.seasonNumber - b.seasonNumber);
 
-    // 6. تحديد مؤشر الموسم عبر المطابقة المباشرة مع عنوان العمل في الكتالوج (Title Matching)
-    // استخراج عنوان الآرك الخاص بالعنصر المضغوط عليه (سواء كان في seasonTitle أو بعد النقطتين في الاسم)
-    const clickedSeasonTitle = (anime.seasonTitle || '').toLowerCase().trim();
-    const clickedSubtitlePart = rawTitle.includes(':') 
-      ? rawTitle.split(':')[1].toLowerCase().trim() 
-      : rawTitle.toLowerCase().trim();
+    // 6. استخراج رقم الموسم المستهدف من الرابط (Query Param) أو من وثيقة الأنمي
+    const requestedSeason = parseInt(req.query.season, 10);
+    const targetSeasonNum = !isNaN(requestedSeason) ? requestedSeason : (parseInt(anime.seasonNumber, 10) || 1);
 
-    let targetSeasonIndex = structuredSeasons.findIndex(s => {
-      const sTitleLower = (s.title || '').toLowerCase().trim();
-      // مطابقة بالاسم الكامل المسجل للموسم
-      if (clickedSeasonTitle && sTitleLower === clickedSeasonTitle) return true;
-      // مطابقة إذا كان عنوان الموسم يحتوي على الجزء الخاص بالآرك (مثل East Blue)
-      if (clickedSubtitlePart && (sTitleLower.includes(clickedSubtitlePart) || clickedSubtitlePart.includes(sTitleLower))) return true;
-      return false;
-    });
+    // العثور على المؤشر عبر رقم الموسم
+    let targetSeasonIndex = structuredSeasons.findIndex(s => s.seasonNumber === targetSeasonNum);
 
-    // احتياطي: إذا لم يتطابق بالاسم، يطابق برقم الموسم
-    if (targetSeasonIndex === -1) {
-      const currentSeasonNum = parseInt(anime.seasonNumber, 10) || 1;
-      targetSeasonIndex = structuredSeasons.findIndex(s => s.seasonNumber === currentSeasonNum);
+    // خيار احتياطي بالمطابقة النصية لعنوان الآرك
+    if (targetSeasonIndex === -1 && anime.seasonTitle) {
+      const matchTitle = anime.seasonTitle.toLowerCase().trim();
+      targetSeasonIndex = structuredSeasons.findIndex(s => s.title && s.title.toLowerCase().trim().includes(matchTitle));
     }
 
     if (targetSeasonIndex === -1) targetSeasonIndex = 0;
 
-    // 7. إسناد حلقات الموسم المطابق مباشرة لواجهة المشغل
+    // 7. إسناد حلقات الموسم المختار مباشرة في مصفوفة episodes
     const activeSeasonEpisodes = structuredSeasons[targetSeasonIndex]
       ? structuredSeasons[targetSeasonIndex].episodes
       : formattedEpisodes;
@@ -317,8 +306,7 @@ app.get('/api/animes/:id', async (req, res) => {
       success: true,
       data: {
         ...anime.toObject(),
-        seasonNumber: structuredSeasons[targetSeasonIndex]?.seasonNumber || 1,
-        seasonTitle: structuredSeasons[targetSeasonIndex]?.title || anime.seasonTitle,
+        seasonNumber: targetSeasonNum,
         defaultSeasonIndex: targetSeasonIndex,
         seasons: structuredSeasons,
         episodes: activeSeasonEpisodes,
