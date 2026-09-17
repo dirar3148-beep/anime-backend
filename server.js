@@ -247,13 +247,15 @@ app.get('/api/animes/:id', async (req, res) => {
         url: sub.url
       }));
 
+      const parsedSeasonNum = parseInt(epObj.seasonNumber, 10) || 1;
+
       return {
         ...epObj,
         title: typeof epObj.title === 'object' 
           ? (epObj.title.en || epObj.title.ar || `Episode ${epObj.episodeNumber}`) 
           : (epObj.title || `Episode ${epObj.episodeNumber}`),
-        seasonNumber: epObj.seasonNumber || 1,
-        seasonTitle: epObj.seasonTitle || `Season ${epObj.seasonNumber || 1}`,
+        seasonNumber: parsedSeasonNum,
+        seasonTitle: epObj.seasonTitle || `Season ${parsedSeasonNum}`,
         sources: processedSources,
         subtitles: subtitles
       };
@@ -262,7 +264,7 @@ app.get('/api/animes/:id', async (req, res) => {
     // 5. تجميع الحلقات داخل مصفوفة مواسم منظمة للمشغل
     const seasonsMap = new Map();
     formattedEpisodes.forEach(ep => {
-      const sNum = ep.seasonNumber || 1;
+      const sNum = parseInt(ep.seasonNumber, 10) || 1;
       const sTitle = ep.seasonTitle || `Season ${sNum}`;
 
       if (!seasonsMap.has(sNum)) {
@@ -278,12 +280,24 @@ app.get('/api/animes/:id', async (req, res) => {
     const structuredSeasons = Array.from(seasonsMap.values())
       .sort((a, b) => a.seasonNumber - b.seasonNumber);
 
-    // 6. تحديد مؤشر الموسم الافتراضي بناءً على الأنمي المضغوط عليه
-    const currentSeasonNum = anime.seasonNumber || 1;
-    let targetSeasonIndex = structuredSeasons.findIndex(s => s.seasonNumber === currentSeasonNum);
+    // 6. تحديد مؤشر الموسم الافتراضي بدقة تامة باستخدام parseInt
+    const currentSeasonNum = parseInt(anime.seasonNumber, 10) || 1;
+    let targetSeasonIndex = structuredSeasons.findIndex(s => parseInt(s.seasonNumber, 10) === currentSeasonNum);
+
+    // التحقق الاحتياطي بالاسم إذا اختلف الترقيم
+    if (targetSeasonIndex === -1 && anime.seasonTitle) {
+      targetSeasonIndex = structuredSeasons.findIndex(
+        s => s.title && s.title.toLowerCase().trim() === anime.seasonTitle.toLowerCase().trim()
+      );
+    }
+
     if (targetSeasonIndex === -1) targetSeasonIndex = 0;
 
-    // 7. إرجاع المواسم والحلقات مع مؤشر الموسم المطلوب
+    // 7. إسناد حلقات الموسم المضغوط عليه مباشرة في حقل episodes
+    const activeSeasonEpisodes = structuredSeasons[targetSeasonIndex]
+      ? structuredSeasons[targetSeasonIndex].episodes
+      : formattedEpisodes;
+
     res.json({
       success: true,
       data: {
@@ -291,7 +305,8 @@ app.get('/api/animes/:id', async (req, res) => {
         seasonNumber: currentSeasonNum,
         defaultSeasonIndex: targetSeasonIndex,
         seasons: structuredSeasons,
-        episodes: formattedEpisodes
+        episodes: activeSeasonEpisodes, // ⬅️ حلقات الموسم المختار مباشرة لواجهة المشغل
+        allEpisodes: formattedEpisodes
       }
     });
 
