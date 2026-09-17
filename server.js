@@ -193,11 +193,14 @@ app.get('/api/animes/:id', async (req, res) => {
       return res.status(404).json({ success: false, message: 'Anime not found' });
     }
 
-    // 1. استخراج الاسم الأساسي للأنمي لجلب مواسم السلسلة معاً (مثل Jujutsu Kaisen)
+    // 1. استخراج الاسم الأساسي للأنمي بتنظيف كل ما يتبع النقطتين الرأسيتين أو صياغات المواسم والآركات
     const rawTitle = anime.title?.en || anime.title || "";
-    const cleanBaseTitle = rawTitle.replace(/\s*(2nd Season|Season \d+|Part \d+|\(TV\)).*/i, '').trim();
+    const cleanBaseTitle = rawTitle
+      .split(':')[0]
+      .replace(/\s*(2nd Season|Season \d+|Part \d+|\(TV\)|-).*/i, '')
+      .trim();
 
-    // 2. البحث عن جميع مواسم السلسلة المسجلة في جدول animes
+    // 2. البحث عن جميع مواسم وآركات السلسلة المسجلة في جدول animes
     const franchiseAnimes = await Anime.find({
       $or: [
         { "title.en": { $regex: new RegExp(`^${cleanBaseTitle}`, "i") } },
